@@ -30,7 +30,10 @@ public class Worker : BackgroundService
     private readonly RabbitMQSettings _mqSettings;
     private readonly EmailSettings _emailSettings;
 
-    private readonly ConnectionFactory _factory;
+    private ConnectionFactory _factory;
+    private IConnection _connection;
+    private IModel _channel;
+    private EventingBasicConsumer _consumer;
 
     private readonly ILogger<Worker> _logger;
 
@@ -39,42 +42,41 @@ public class Worker : BackgroundService
         _mqSettings = mqSettings.Value;
         _emailSettings = emailSettings.Value;
         _logger = logger;
+    }
 
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
         _factory = new ConnectionFactory
         {
             HostName = _mqSettings.HostName,
             UserName = _mqSettings.UserName,
             Password = _mqSettings.Password
         };
-        using var connection = _factory.CreateConnection();
-        using var channel = connection.CreateModel();
-        channel.QueueDeclare(queue: _mqSettings.QueueName,
+        _connection = _factory.CreateConnection();
+        _logger.LogInformation("Connected to RabbitMQ server at {host}", _mqSettings.HostName);
+
+        _channel = _connection.CreateModel();
+        _channel.QueueDeclare(queue: _mqSettings.QueueName,
             durable: true,
             exclusive: false,
             autoDelete: false,
             arguments: null);
-    }
+        _logger.LogInformation("Queue {queue} declared", _mqSettings.QueueName);
 
-    protected override Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
+        _consumer = new EventingBasicConsumer(_channel);
+        _consumer.Received += async (model, ea) =>
         {
-            using var connection = _factory.CreateConnection();
-            using var channel = connection.CreateModel();
-            channel.QueueDeclarePassive(_mqSettings.QueueName);
-
-            var consumer = new EventingBasicConsumer(channel);
-            consumer.Received += async (model, ea) =>
-            {
-                var messages = MessagePackSerializer.Deserialize<List<byte[]>>(ea.Body.ToArray())
+            var messages = MessagePackSerializer.Deserialize<List<byte[]>>(ea.Body.ToArray())
                 .Select(bytes =>
                 {
                     using var stream = new MemoryStream(bytes);
                     return MimeMessage.Load(stream);
                 }).ToList();
-                await SendEmailAsync(messages);
-            };
-        }
+            await SendEmailAsync(messages);
+            _channel.BasicAck(deliveryTag: ea.DeliveryTag, multiple: false);
+        };
+        _channel.BasicConsume(queue: _mqSettings.QueueName, autoAck: false, consumer: _consumer);
+        _logger.LogInformation("Consumer listens to queue {queue}", _mqSettings.QueueName);
 
         return Task.CompletedTask;
     }
@@ -114,5 +116,23 @@ public class Worker : BackgroundService
         }
 
         await client.DisconnectAsync(true);
+    }
+
+    public override Task StopAsync(CancellationToken cancellationToken)
+    {
+        _channel.Close();
+        _connection.Close();
+        _logger.LogInformation("Channel and connection closed");
+
+        return base.StopAsync(cancellationToken);
+    }
+
+    public override void Dispose()
+    {
+        _channel.Dispose();
+        _connection.Dispose();
+        _logger.LogInformation("Channel and connection disposed");
+
+        base.Dispose();
     }
 }
