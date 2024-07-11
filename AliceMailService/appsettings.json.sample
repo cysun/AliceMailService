@@ -1,0 +1,37 @@
+{
+  "RabbitMQ": {
+    "QueueName": "alice-mail-service"
+  },
+  "Email": {
+    "Host": "localhost",
+    "Port": 25,
+    "RequireAuthentication": true,
+    "Username": "cysun@localhost.localdomain",
+    "Password": "abcd"
+  },
+  "Serilog": {
+    "Using": [
+      "Serilog.Sinks.File"
+    ],
+    "WriteTo": [
+      {
+        "Name": "File",
+        "Args": {
+          "path": "D:/Temp/ams/log.txt",
+          "rollingInterval": "Day",
+          "retainedFileCountLimit": null
+        }
+      }
+    ],
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "Enrich": [
+      "FromLogContext"
+    ]
+  }
+}

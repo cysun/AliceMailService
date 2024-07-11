@@ -1,7 +1,16 @@
 using AliceMailService;
+using Serilog;
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddHostedService<Worker>();
+
+var services = builder.Services;
+
+services.AddSystemd();
+services.AddSerilog();
+
+services.Configure<RabbitMQSettings>(builder.Configuration.GetSection("RabbitMQ"));
+services.Configure<EmailSettings>(builder.Configuration.GetSection("Email"));
+services.AddHostedService<Worker>();
 
 var host = builder.Build();
 host.Run();
