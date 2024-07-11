@@ -61,12 +61,17 @@ public class Worker : BackgroundService
         {
             using var connection = _factory.CreateConnection();
             using var channel = connection.CreateModel();
-            channel.QueueBind(exchange: string.Empty, queue: _mqSettings.QueueName, routingKey: _mqSettings.QueueName);
+            channel.QueueDeclarePassive(_mqSettings.QueueName);
 
             var consumer = new EventingBasicConsumer(channel);
             consumer.Received += async (model, ea) =>
             {
-                var messages = MessagePackSerializer.Deserialize<List<MimeMessage>>(ea.Body.ToArray());
+                var messages = MessagePackSerializer.Deserialize<List<byte[]>>(ea.Body.ToArray())
+                .Select(bytes =>
+                {
+                    using var stream = new MemoryStream(bytes);
+                    return MimeMessage.Load(stream);
+                }).ToList();
                 await SendEmailAsync(messages);
             };
         }
