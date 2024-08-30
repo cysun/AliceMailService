@@ -7,7 +7,9 @@
     "Port": 25,
     "RequireAuthentication": true,
     "Username": "cysun@localhost.localdomain",
-    "Password": "abcd"
+    "Password": "abcd",
+    "AlertSender": "AMS Alert <alert@localhost.localdomain>",
+    "AlertRecipient": "Chengyu Sun <cysun@localhost.localdomain>"
   },
   "Serilog": {
     "Using": [

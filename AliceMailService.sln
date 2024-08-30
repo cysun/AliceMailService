@@ -5,7 +5,12 @@ VisualStudioVersion = 17.10.35027.167
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AliceMailService", "AliceMailService\AliceMailService.csproj", "{70A1FAE9-6A1D-4622-997C-AFCC2A268784}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EmailTest", "EmailTest\EmailTest.csproj", "{1745F699-8DE6-43B9-86CE-B2592B75BDB8}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "EmailTest", "EmailTest\EmailTest.csproj", "{1745F699-8DE6-43B9-86CE-B2592B75BDB8}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{F4C35BD2-5EC8-41F8-B901-6C02CA760AE5}"
+	ProjectSection(SolutionItems) = preProject
+		README.md = README.md
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
