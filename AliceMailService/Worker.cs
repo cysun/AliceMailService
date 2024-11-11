@@ -34,8 +34,8 @@ public class Worker : BackgroundService
 
     private ConnectionFactory _factory;
     private IConnection _connection;
-    private IModel _channel;
-    private EventingBasicConsumer _consumer;
+    private IChannel _channel;
+    private AsyncEventingBasicConsumer _consumer;
 
     private readonly ILogger<Worker> _logger;
 
@@ -46,7 +46,7 @@ public class Worker : BackgroundService
         _logger = logger;
     }
 
-    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _factory = new ConnectionFactory
         {
@@ -57,19 +57,19 @@ public class Worker : BackgroundService
 
         try
         {
-            _connection = _factory.CreateConnection();
+            _connection = await _factory.CreateConnectionAsync();
             _logger.LogInformation("Connected to RabbitMQ server at {host}", _mqSettings.HostName);
 
-            _channel = _connection.CreateModel();
-            _channel.QueueDeclare(queue: _mqSettings.QueueName,
+            _channel = await _connection.CreateChannelAsync();
+            await _channel.QueueDeclareAsync(queue: _mqSettings.QueueName,
                 durable: true,
                 exclusive: false,
                 autoDelete: false,
                 arguments: null);
             _logger.LogInformation("Queue {queue} declared", _mqSettings.QueueName);
 
-            _consumer = new EventingBasicConsumer(_channel);
-            _consumer.Received += async (model, ea) =>
+            _consumer = new AsyncEventingBasicConsumer(_channel);
+            _consumer.ReceivedAsync += async (model, ea) =>
             {
                 var messages = MessagePackSerializer.Deserialize<List<byte[]>>(ea.Body.ToArray())
                     .Select(bytes =>
@@ -78,9 +78,9 @@ public class Worker : BackgroundService
                         return MimeMessage.Load(stream);
                     }).ToList();
                 await SendEmailAsync(messages);
-                _channel.BasicAck(deliveryTag: ea.DeliveryTag, multiple: false);
+                await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
             };
-            _channel.BasicConsume(queue: _mqSettings.QueueName, autoAck: false, consumer: _consumer);
+            await _channel.BasicConsumeAsync(queue: _mqSettings.QueueName, autoAck: false, consumer: _consumer);
             _logger.LogInformation("Consumer listens to queue {queue}", _mqSettings.QueueName);
         }
         catch (Exception ex)
@@ -88,8 +88,6 @@ public class Worker : BackgroundService
             _logger.LogError(ex, "Failed to connect to RabbitMQ server at {host}", _mqSettings.HostName);
             SendAlert("Failed to Connect to RabbitMQ Server", ex.Message);
         }
-
-        return Task.CompletedTask;
     }
 
     private async Task SendEmailAsync(List<MimeMessage> messages)
@@ -177,15 +175,15 @@ public class Worker : BackgroundService
         client.Disconnect(true);
     }
 
-    public override Task StopAsync(CancellationToken cancellationToken)
+    public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        _channel.Close();
-        _connection.Close();
+        await _channel.CloseAsync();
+        await _connection.CloseAsync();
         _logger.LogInformation("Channel and connection closed");
 
         SendAlert("AliceMailService Stopped", "The service has been stopped.");
 
-        return base.StopAsync(cancellationToken);
+        await base.StopAsync(cancellationToken);
     }
 
     public override void Dispose()
