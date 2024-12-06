@@ -9,7 +9,8 @@
     "Username": "cysun@localhost.localdomain",
     "Password": "abcd",
     "AlertSender": "AMS Alert <alert@localhost.localdomain>",
-    "AlertRecipient": "Chengyu Sun <cysun@localhost.localdomain>"
+    "AlertRecipient": "Chengyu Sun <cysun@localhost.localdomain>",
+    "MockSend": false
   },
   "Serilog": {
     "Using": [

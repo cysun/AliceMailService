@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using MimeKit;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using System.Text;
 
 namespace AliceMailService;
 
@@ -25,6 +26,7 @@ public class EmailSettings
     public string Password { get; set; } = "abcd";
     public string AlertSender { get; set; }
     public string AlertRecipient { get; set; }
+    public bool MockSend { get; set; } = false;
 }
 
 public class Worker : BackgroundService
@@ -92,6 +94,12 @@ public class Worker : BackgroundService
 
     private async Task SendEmailAsync(List<MimeMessage> messages)
     {
+        if (_emailSettings.MockSend)
+        {
+            MockSendEmail(messages);
+            return;
+        }
+
         using var client = new SmtpClient();
 
         try
@@ -127,6 +135,21 @@ public class Worker : BackgroundService
         await client.DisconnectAsync(true);
     }
 
+    private void MockSendEmail(List<MimeMessage> messages)
+    {
+        foreach (var message in messages)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("***");
+            sb.AppendLine($"From: {message.From}");
+            sb.AppendLine($"To: {message.To}");
+            sb.AppendLine($"Subject: {message.Subject}");
+            sb.AppendLine($"{message.Body}");
+            sb.AppendLine("***");
+            _logger.LogInformation(sb.ToString());
+        }
+    }
+
     // This is basically a synchronous version of SendEmail. There should be no need for this method since we should
     // be able to use SendMailAsync, but the problem is that C# has some weird rules about await an async method in a
     // catch block, which is where I want to send an alert email. Technically we can await an async method in a catch
@@ -142,6 +165,12 @@ public class Worker : BackgroundService
         {
             Text = content
         };
+
+        if (_emailSettings.MockSend)
+        {
+            MockSendEmail(new List<MimeMessage> { message });
+            return;
+        }
 
         using var client = new SmtpClient();
 

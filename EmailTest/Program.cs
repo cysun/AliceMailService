@@ -15,9 +15,9 @@ var factory = new ConnectionFactory
     UserName = mqSettings.UserName,
     Password = mqSettings.Password
 };
-using var connection = factory.CreateConnection();
-using var channel = connection.CreateModel();
-channel.QueueDeclare(mqSettings.QueueName, true, false, false, null);
+using var connection = await factory.CreateConnectionAsync();
+using var channel = await connection.CreateChannelAsync();
+await channel.QueueDeclareAsync(mqSettings.QueueName, true, false, false, null);
 
 Console.Write("From: ");
 var from = Console.ReadLine();
@@ -46,6 +46,6 @@ using (MemoryStream stream = new MemoryStream())
 
 var body = MessagePackSerializer.Serialize(messages);
 
-channel.BasicPublish(string.Empty, mqSettings.QueueName, null, body);
+await channel.BasicPublishAsync(exchange: string.Empty, routingKey: mqSettings.QueueName, body: body);
 
 Console.WriteLine("Message sent!");
