@@ -1,3 +1,4 @@
+using System.Text;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using MessagePack;
@@ -5,48 +6,42 @@ using Microsoft.Extensions.Options;
 using MimeKit;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using System.Text;
 
 namespace AliceMailService;
 
 public class RabbitMQSettings
 {
-    public string HostName { get; set; } = "localhost";
-    public string UserName { get; set; } = ConnectionFactory.DefaultUser;
-    public string Password { get; set; } = ConnectionFactory.DefaultPass;
-    public string QueueName { get; set; } = "alice-mail-service";
+    public string HostName { get; init; } = "localhost";
+    public string UserName { get; init; } = ConnectionFactory.DefaultUser;
+    public string Password { get; init; } = ConnectionFactory.DefaultPass;
+    public string QueueName { get; init; } = "alice-mail-service";
 }
 
 public class EmailSettings
 {
-    public string Host { get; set; } = "localhost";
-    public int Port { get; set; } = 25;
-    public bool RequireAuthentication { get; set; } = false;
-    public string Username { get; set; } = "cysun@localhost.localdomain";
-    public string Password { get; set; } = "abcd";
-    public string AlertSender { get; set; }
-    public string AlertRecipient { get; set; }
-    public bool MockSend { get; set; } = false;
+    public string Host { get; init; } = "localhost";
+    public int Port { get; init; } = 25;
+    public bool RequireAuthentication { get; init; }
+    public string Username { get; init; } = "cysun@localhost.localdomain";
+    public string Password { get; init; } = "abcd";
+    public string AlertSender { get; init; }
+    public string AlertRecipient { get; init; }
+    public bool MockSend { get; init; } // for testing in environments without a local email server
 }
 
-public class Worker : BackgroundService
+public class Worker(
+    IOptions<RabbitMQSettings> mqSettings,
+    IOptions<EmailSettings> emailSettings,
+    ILogger<Worker> logger)
+    : BackgroundService
 {
-    private readonly RabbitMQSettings _mqSettings;
-    private readonly EmailSettings _emailSettings;
-
-    private ConnectionFactory _factory;
-    private IConnection _connection;
+    private readonly EmailSettings _emailSettings = emailSettings.Value;
+    private readonly RabbitMQSettings _mqSettings = mqSettings.Value;
     private IChannel _channel;
+    private IConnection _connection;
     private AsyncEventingBasicConsumer _consumer;
 
-    private readonly ILogger<Worker> _logger;
-
-    public Worker(IOptions<RabbitMQSettings> mqSettings, IOptions<EmailSettings> emailSettings, ILogger<Worker> logger)
-    {
-        _mqSettings = mqSettings.Value;
-        _emailSettings = emailSettings.Value;
-        _logger = logger;
-    }
+    private ConnectionFactory _factory;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -59,19 +54,16 @@ public class Worker : BackgroundService
 
         try
         {
-            _connection = await _factory.CreateConnectionAsync();
-            _logger.LogInformation("Connected to RabbitMQ server at {host}", _mqSettings.HostName);
+            _connection = await _factory.CreateConnectionAsync(stoppingToken);
+            logger.LogInformation("Connected to RabbitMQ server at {host}", _mqSettings.HostName);
 
-            _channel = await _connection.CreateChannelAsync();
-            await _channel.QueueDeclareAsync(queue: _mqSettings.QueueName,
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: null);
-            _logger.LogInformation("Queue {queue} declared", _mqSettings.QueueName);
+            _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
+            await _channel.QueueDeclareAsync(_mqSettings.QueueName, true, false, false,
+                cancellationToken: stoppingToken);
+            logger.LogInformation("Queue {queue} declared", _mqSettings.QueueName);
 
             _consumer = new AsyncEventingBasicConsumer(_channel);
-            _consumer.ReceivedAsync += async (model, ea) =>
+            _consumer.ReceivedAsync += async (_, ea) =>
             {
                 var messages = MessagePackSerializer.Deserialize<List<byte[]>>(ea.Body.ToArray())
                     .Select(bytes =>
@@ -80,14 +72,14 @@ public class Worker : BackgroundService
                         return MimeMessage.Load(stream);
                     }).ToList();
                 await SendEmailAsync(messages);
-                await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
+                await _channel.BasicAckAsync(ea.DeliveryTag, false, stoppingToken);
             };
-            await _channel.BasicConsumeAsync(queue: _mqSettings.QueueName, autoAck: false, consumer: _consumer);
-            _logger.LogInformation("Consumer listens to queue {queue}", _mqSettings.QueueName);
+            await _channel.BasicConsumeAsync(_mqSettings.QueueName, false, _consumer, stoppingToken);
+            logger.LogInformation("Consumer listens to queue {queue}", _mqSettings.QueueName);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to connect to RabbitMQ server at {host}", _mqSettings.HostName);
+            logger.LogError(ex, "Failed to connect to RabbitMQ server at {host}", _mqSettings.HostName);
             SendAlert("Failed to Connect to RabbitMQ Server", ex.Message);
         }
     }
@@ -116,21 +108,20 @@ public class Worker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to connect to SMTP server");
+            logger.LogError(ex, "Failed to connect to SMTP server");
         }
 
         foreach (var message in messages)
-        {
             try
             {
                 await client.SendAsync(message);
-                _logger.LogInformation("Message [{subject}] sent to {receipient}", message.Subject, message.To);
+                logger.LogInformation("Message [{subject}] sent to {recipient}", message.Subject, message.To);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to send message [{subject}] sent to {receipient}", message.Subject, message.To);
+                logger.LogError(ex, "Failed to send message [{subject}] sent to {recipient}", message.Subject,
+                    message.To);
             }
-        }
 
         await client.DisconnectAsync(true);
     }
@@ -146,7 +137,7 @@ public class Worker : BackgroundService
             sb.AppendLine($"Subject: {message.Subject}");
             sb.AppendLine($"{message.Body}");
             sb.AppendLine("***");
-            _logger.LogInformation(sb.ToString());
+            logger.LogInformation(sb.ToString());
         }
     }
 
@@ -168,7 +159,7 @@ public class Worker : BackgroundService
 
         if (_emailSettings.MockSend)
         {
-            MockSendEmail(new List<MimeMessage> { message });
+            MockSendEmail([message]);
             return;
         }
 
@@ -188,17 +179,18 @@ public class Worker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to connect to SMTP server");
+            logger.LogError(ex, "Failed to connect to SMTP server");
         }
 
         try
         {
             client.SendAsync(message);
-            _logger.LogInformation("Message [{subject}] sent to {receipient}", message.Subject, message.To);
+            logger.LogInformation("Message [{subject}] sent to {recipient}", message.Subject, message.To);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to send message [{subject}] sent to {receipient}", message.Subject, message.To);
+            logger.LogError(ex, "Failed to send message [{subject}] sent to {recipient}", message.Subject,
+                message.To);
         }
 
         client.Disconnect(true);
@@ -206,9 +198,9 @@ public class Worker : BackgroundService
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        await _channel.CloseAsync();
-        await _connection.CloseAsync();
-        _logger.LogInformation("Channel and connection closed");
+        await _channel.CloseAsync(cancellationToken);
+        await _connection.CloseAsync(cancellationToken);
+        logger.LogInformation("Channel and connection closed");
 
         SendAlert("AliceMailService Stopped", "The service has been stopped.");
 
@@ -219,7 +211,7 @@ public class Worker : BackgroundService
     {
         _channel.Dispose();
         _connection.Dispose();
-        _logger.LogInformation("Channel and connection disposed");
+        logger.LogInformation("Channel and connection disposed");
 
         base.Dispose();
     }

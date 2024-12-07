@@ -6,9 +6,9 @@ var builder = Host.CreateApplicationBuilder(args);
 var services = builder.Services;
 
 services.AddSystemd();
-services.AddSerilog((services, loggerConfiguration) => loggerConfiguration
+services.AddSerilog((serviceProvider, loggerConfiguration) => loggerConfiguration
     .ReadFrom.Configuration(builder.Configuration)
-    .ReadFrom.Services(services)
+    .ReadFrom.Services(serviceProvider)
 );
 
 services.Configure<RabbitMQSettings>(builder.Configuration.GetSection("RabbitMQ"));
