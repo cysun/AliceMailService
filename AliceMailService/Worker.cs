@@ -24,8 +24,6 @@ public class EmailSettings
     public bool RequireAuthentication { get; init; }
     public string Username { get; init; } = "cysun@localhost.localdomain";
     public string Password { get; init; } = "abcd";
-    public string AlertSender { get; init; }
-    public string AlertRecipient { get; init; }
     public bool MockSend { get; init; } // for testing in environments without a local email server
 }
 
@@ -80,7 +78,6 @@ public class Worker(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to connect to RabbitMQ server at {host}", _mqSettings.HostName);
-            SendAlert("Failed to Connect to RabbitMQ Server", ex.Message);
         }
     }
 
@@ -140,69 +137,12 @@ public class Worker(
             logger.LogInformation(sb.ToString());
         }
     }
-
-    // This is basically a synchronous version of SendEmail. There should be no need for this method since we should
-    // be able to use SendMailAsync, but the problem is that C# has some weird rules about await an async method in a
-    // catch block, which is where I want to send an alert email. Technically we can await an async method in a catch
-    // block since C# 6, but it would require changing the return type of the method from Task to "async Task<Task>".
-    // I've yet to fully understood this, so the current workaround is to use this synchronous method.
-    private void SendAlert(string subject, string content)
-    {
-        var message = new MimeMessage();
-        message.From.Add(MailboxAddress.Parse(_emailSettings.AlertSender));
-        message.To.Add(MailboxAddress.Parse(_emailSettings.AlertRecipient));
-        message.Subject = subject;
-        message.Body = new TextPart("plain")
-        {
-            Text = content
-        };
-
-        if (_emailSettings.MockSend)
-        {
-            MockSendEmail([message]);
-            return;
-        }
-
-        using var client = new SmtpClient();
-
-        try
-        {
-            if (_emailSettings.RequireAuthentication)
-            {
-                client.Connect(_emailSettings.Host, _emailSettings.Port, SecureSocketOptions.StartTls);
-                client.Authenticate(_emailSettings.Username, _emailSettings.Password);
-            }
-            else // for testing with local SMTP server
-            {
-                client.Connect(_emailSettings.Host, _emailSettings.Port, SecureSocketOptions.None);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to connect to SMTP server");
-        }
-
-        try
-        {
-            client.SendAsync(message);
-            logger.LogInformation("Message [{subject}] sent to {recipient}", message.Subject, message.To);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to send message [{subject}] sent to {recipient}", message.Subject,
-                message.To);
-        }
-
-        client.Disconnect(true);
-    }
-
+    
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await _channel.CloseAsync(cancellationToken);
         await _connection.CloseAsync(cancellationToken);
         logger.LogInformation("Channel and connection closed");
-
-        SendAlert("AliceMailService Stopped", "The service has been stopped.");
 
         await base.StopAsync(cancellationToken);
     }
