@@ -368,3 +368,4 @@ Migrations/
 deploy.sh
 .vscode/
 .idea/
+.DS_Store
