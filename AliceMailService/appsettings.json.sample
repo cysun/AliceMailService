@@ -8,7 +8,9 @@
     "RequireAuthentication": true,
     "Username": "cysun@localhost.localdomain",
     "Password": "abcd",
-    "MockSend": false
+    "MockSend": false,
+    "SendIntervalMilliseconds": 1000,
+    "RetryDelaysSeconds": [5, 10, 30]
   },
   "Serilog": {
     "Using": [

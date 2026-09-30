@@ -1,9 +1,4 @@
-using System.Text;
-using MailKit.Net.Smtp;
-using MailKit.Security;
-using MessagePack;
 using Microsoft.Extensions.Options;
-using MimeKit;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -15,144 +10,86 @@ public class RabbitMQSettings
     public string UserName { get; init; } = ConnectionFactory.DefaultUser;
     public string Password { get; init; } = ConnectionFactory.DefaultPass;
     public string QueueName { get; init; } = "alice-mail-service";
-}
-
-public class EmailSettings
-{
-    public string Host { get; init; } = "localhost";
-    public int Port { get; init; } = 25;
-    public bool RequireAuthentication { get; init; }
-    public string Username { get; init; } = "cysun@localhost.localdomain";
-    public string Password { get; init; } = "abcd";
-    public bool MockSend { get; init; } // for testing in environments without a local email server
+    public string FailedQueueName => $"{QueueName}.failed";
 }
 
 public class Worker(
     IOptions<RabbitMQSettings> mqSettings,
-    IOptions<EmailSettings> emailSettings,
-    ILogger<Worker> logger)
-    : BackgroundService
+    MailBatchProcessor processor,
+    ILogger<Worker> logger) : BackgroundService
 {
-    private readonly EmailSettings _emailSettings = emailSettings.Value;
-    private readonly RabbitMQSettings _mqSettings = mqSettings.Value;
-    private IChannel _channel;
-    private IConnection _connection;
-    private AsyncEventingBasicConsumer _consumer;
-
-    private ConnectionFactory _factory;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _factory = new ConnectionFactory
+        var settings = mqSettings.Value;
+        var factory = new ConnectionFactory
         {
-            HostName = _mqSettings.HostName,
-            UserName = _mqSettings.UserName,
-            Password = _mqSettings.Password
+            HostName = settings.HostName,
+            UserName = settings.UserName,
+            Password = settings.Password,
+            ConsumerDispatchConcurrency = 1
         };
 
+        using var processingCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         try
         {
-            _connection = await _factory.CreateConnectionAsync(stoppingToken);
-            logger.LogInformation("Connected to RabbitMQ server at {host}", _mqSettings.HostName);
+            await using var connection = await factory.CreateConnectionAsync(stoppingToken);
+            logger.LogInformation("Connected to RabbitMQ server at {host}", settings.HostName);
 
-            _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
-            await _channel.QueueDeclareAsync(_mqSettings.QueueName, true, false, false,
+            await using var consumerChannel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
+            // Keep confirmations on a separate channel from the consumer callback.
+            await using var failureChannel = await connection.CreateChannelAsync(
+                new CreateChannelOptions(publisherConfirmationsEnabled: true,
+                    publisherConfirmationTrackingEnabled: true), stoppingToken);
+
+            await consumerChannel.QueueDeclareAsync(settings.QueueName, true, false, false,
                 cancellationToken: stoppingToken);
-            logger.LogInformation("Queue {queue} declared", _mqSettings.QueueName);
+            await failureChannel.QueueDeclareAsync(settings.FailedQueueName, true, false, false,
+                cancellationToken: stoppingToken);
+            await consumerChannel.BasicQosAsync(0, 1, false, stoppingToken);
 
-            _consumer = new AsyncEventingBasicConsumer(_channel);
-            _consumer.ReceivedAsync += async (_, ea) =>
+            await processor.RetryFailedAsync(consumerChannel, failureChannel, stoppingToken);
+
+            var processingFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var consumer = new AsyncEventingBasicConsumer(consumerChannel);
+            consumer.ReceivedAsync += async (_, ea) =>
             {
-                var messages = MessagePackSerializer.Deserialize<List<byte[]>>(ea.Body.ToArray())
-                    .Select(bytes =>
-                    {
-                        using var stream = new MemoryStream(bytes);
-                        return MimeMessage.Load(stream);
-                    }).ToList();
-                await SendEmailAsync(messages);
-                await _channel.BasicAckAsync(ea.DeliveryTag, false, stoppingToken);
+                try
+                {
+                    await processor.ProcessAsync(ea.Body, ea.DeliveryTag, consumerChannel, failureChannel,
+                        processingCancellation.Token);
+                }
+                catch (OperationCanceledException) when (processingCancellation.IsCancellationRequested)
+                {
+                    // Leave the batch unacknowledged. Closing the connection makes it available again.
+                }
+                catch (Exception ex)
+                {
+                    // Consumer callback exceptions otherwise leave the host running with a stuck batch.
+                    // Stop instead of acknowledging or immediately replaying a partially delivered batch.
+                    processingCancellation.Cancel();
+                    processingFailure.TrySetResult(ex);
+                }
             };
-            await _channel.BasicConsumeAsync(_mqSettings.QueueName, false, _consumer, stoppingToken);
-            logger.LogInformation("Consumer listens to queue {queue}", _mqSettings.QueueName);
+
+            await consumerChannel.BasicConsumeAsync(settings.QueueName, false, consumer, stoppingToken);
+            logger.LogInformation("Consumer listens to {queue}; failed emails are retained in {failedQueue}",
+                settings.QueueName, settings.FailedQueueName);
+
+            var shutdown = Task.Delay(Timeout.Infinite, stoppingToken);
+            if (await Task.WhenAny(shutdown, processingFailure.Task) == processingFailure.Task)
+                throw new InvalidOperationException(
+                    "Failed to process or retain an email batch. The original batch was not acknowledged.",
+                    await processingFailure.Task);
+            await shutdown;
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            logger.LogInformation("Mail worker stopped; RabbitMQ channels and connection disposed");
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to connect to RabbitMQ server at {host}", _mqSettings.HostName);
+            logger.LogCritical(ex, "Mail worker stopped after a RabbitMQ or batch processing failure");
+            throw;
         }
-    }
-
-    private async Task SendEmailAsync(List<MimeMessage> messages)
-    {
-        if (_emailSettings.MockSend)
-        {
-            MockSendEmail(messages);
-            return;
-        }
-
-        using var client = new SmtpClient();
-
-        try
-        {
-            if (_emailSettings.RequireAuthentication)
-            {
-                await client.ConnectAsync(_emailSettings.Host, _emailSettings.Port, SecureSocketOptions.StartTls);
-                await client.AuthenticateAsync(_emailSettings.Username, _emailSettings.Password);
-            }
-            else // for testing with local SMTP server
-            {
-                await client.ConnectAsync(_emailSettings.Host, _emailSettings.Port, SecureSocketOptions.None);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to connect to SMTP server");
-        }
-
-        foreach (var message in messages)
-            try
-            {
-                await client.SendAsync(message);
-                logger.LogInformation("Message [{subject}] sent to {recipient}", message.Subject, message.To);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Failed to send message [{subject}] sent to {recipient}", message.Subject,
-                    message.To);
-            }
-
-        await client.DisconnectAsync(true);
-    }
-
-    private void MockSendEmail(List<MimeMessage> messages)
-    {
-        foreach (var message in messages)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("***");
-            sb.AppendLine($"From: {message.From}");
-            sb.AppendLine($"To: {message.To}");
-            sb.AppendLine($"Subject: {message.Subject}");
-            sb.AppendLine($"{message.Body}");
-            sb.AppendLine("***");
-            logger.LogInformation(sb.ToString());
-        }
-    }
-    
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        await _channel.CloseAsync(cancellationToken);
-        await _connection.CloseAsync(cancellationToken);
-        logger.LogInformation("Channel and connection closed");
-
-        await base.StopAsync(cancellationToken);
-    }
-
-    public override void Dispose()
-    {
-        _channel.Dispose();
-        _connection.Dispose();
-        logger.LogInformation("Channel and connection disposed");
-
-        base.Dispose();
     }
 }
