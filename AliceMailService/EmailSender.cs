@@ -1,3 +1,4 @@
+using MailKit;
 using MailKit.Net.Smtp;
 using MailKit.Security;
 using Microsoft.Extensions.Options;
@@ -93,8 +94,20 @@ public class EmailSender(
                 await WaitForSendIntervalAsync(cancellationToken);
                 _lastAttemptTimestamp = timeProvider.GetTimestamp();
 
-                if (!_settings.MockSend)
-                    await client.SendAsync(message, cancellationToken);
+                if (_settings.MockSend)
+                {
+                    logger.LogInformation(
+                        "Mock email:\nFrom: {from}\nTo: {to}\nCc: {cc}\nBcc: {bcc}\nReply-To: {replyTo}\n" +
+                        "Subject: {subject}\nMessage-ID: {messageId}\nDate: {date}\nAttachments: {attachments}\n" +
+                        "Text body:\n{textBody}\nHTML body:\n{htmlBody}",
+                        message.From.ToString(), message.To.ToString(), message.Cc.ToString(),
+                        message.Bcc.ToString(), message.ReplyTo.ToString(), message.Subject, message.MessageId,
+                        message.Date, string.Join(", ", message.Attachments.Select(attachment =>
+                            attachment.ContentDisposition?.FileName ?? attachment.ContentType.Name ?? "(unnamed)")),
+                        message.TextBody ?? string.Empty, message.HtmlBody ?? string.Empty);
+                }
+                else
+                    await client.SendAsync(new SendRequest(message), cancellationToken);
 
                 logger.LogInformation(
                     "Message [{subject}] ({messageId}) {sendResult}; recipients: {recipientCount}; attempt: {attempt}",

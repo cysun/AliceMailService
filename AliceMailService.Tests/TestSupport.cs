@@ -79,13 +79,15 @@ internal sealed class SenderFixture
     {
         Client.IsConnected.Returns(true);
         Client.IsAuthenticated.Returns(true);
-        Client.SendAsync(Arg.Any<MimeMessage>(), Arg.Any<CancellationToken>(), Arg.Any<ITransferProgress>())
-            .Returns(call =>
+        Client.SendAsync(Arg.Any<ISendRequest>(), Arg.Any<CancellationToken>())
+            .Returns(async call =>
             {
-                var message = call.ArgAt<MimeMessage>(0);
+                var message = call.ArgAt<ISendRequest>(0).Message;
                 var token = call.ArgAt<CancellationToken>(1);
                 Attempts.Add((message.MessageId, Clock.GetTimestamp(), token));
-                return OnSend(message, token);
+                var response = await OnSend(message, token);
+                var recipients = message.To.Mailboxes.Concat(message.Cc.Mailboxes).Concat(message.Bcc.Mailboxes).ToList();
+                return new SendResult(response, recipients, []);
             });
         Sender = new EmailSender(Options.Create(settings ?? new EmailSettings()), () => Client, Clock, Logger);
     }
